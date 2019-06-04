@@ -8,8 +8,10 @@ from math import radians, cos, sin, asin, sqrt
 import click
 import fiona
 import geopandas as gpd
+import matplotlib.pyplot as plt  # NOQA
 import numpy
 import pandas as pd
+import shapely
 
 
 def to_miles(m):
@@ -21,6 +23,8 @@ def json_default(v):
         return int(v)
     if isinstance(v, pd.Timestamp):
         return '{}'.format(v)
+    if isinstance(v, pd._libs.tslibs.nattype.NaTType):
+        return None
 
     return json.JSONEncoder().default(v)
 
@@ -62,61 +66,64 @@ def haversine(lon1, lat1, lon2, lat2):
     return c * r
 
 
-def stats_for(trackid, track):
-    d_total = 0
-    i1 = track.itertuples()
-    i2 = track.itertuples()
+def stats_for(points, trackid):
+    track = points[points.track_fid == trackid]
+
+    i1 = track.itertuples(index=True)
+    i2 = track.itertuples(index=True)
     next(i2)
 
     d_total = 0
     t_total = datetime.timedelta()
     t_moving = datetime.timedelta()
 
-    stats = {'trackid': trackid}
-    for i, point in enumerate(zip(i1, i2)):
-        if i == 0:
-            stats['t_start'] = point[0].time
-
-        d_delta = haversine(point[0].geometry.y, point[0].geometry.x,
+    for point in zip(i1, i2):
+        delta_d = haversine(point[0].geometry.y, point[0].geometry.x,
                             point[1].geometry.y, point[1].geometry.x)
-        t_delta = point[1].time - point[0].time
-        speed = d_delta/t_delta.total_seconds()
+        delta_t = point[1].time - point[0].time
+        delta_e = point[1].ele - point[0].ele
+        speed = delta_d/delta_t.total_seconds()
+
+        points.loc[point[1].Index, 'delta_t'] = delta_t
+        points.loc[point[1].Index, 'delta_d'] = delta_d
+        points.loc[point[1].Index, 'delta_e'] = delta_e
+        points.loc[point[1].Index, 'speed'] = speed
+        points.loc[point[1].Index, 'segment'] = (
+            shapely.geometry.LineString((
+                (point[0].geometry.x, point[0].geometry.y),
+                (point[1].geometry.x, point[1].geometry.y)
+            ))
+        )
+
         if speed >= 1:
-            t_moving += t_delta
-        t_total += t_delta
-        d_total += d_delta
-
-    stats['t_end'] = point[1].time
-    stats['t_total'] = t_total.total_seconds()
-    stats['t_moving'] = t_moving.total_seconds()
-    stats['d_total'] = d_total
-
-    stats['avg_speed'] = d_total/stats['t_total']
-    stats['mov_speed'] = d_total/stats['t_moving'] if stats['t_moving'] else 0
-
-    stats['avg_speed_mph'] = stats['avg_speed'] * 2.23694
-    stats['mov_speed_mph'] = stats['mov_speed'] * 2.23694
-
-    return stats
+            t_moving += delta_t
+        t_total += delta_t
+        d_total += delta_d
 
 
 @click.command()
+@click.option('-m', '--min-length', type=float)
 @click.argument('gpxfiles', nargs=-1)
-def main(gpxfiles=None):
+def main(min_length=None, gpxfiles=None):
     for gpxfile in gpxfiles:
-        points = read_file(gpxfile)[1]
+        tracklines, points = read_file(gpxfile)
 
-        trackpoints = {}
+        points['segment'] = shapely.geometry.LineString()
+        points['speed'] = 0
+        points['delta_d'] = 0
+        points['delta_t'] = 0
+        points['delta_e'] = 0
+
         for trackid in points.track_fid.unique():
-            trackpoints[trackid] = points.query(
-                'track_fid == {}'.format(trackid))
-
-        for trackid, track in trackpoints.items():
-            if len(track) <= 1:
+            stats = stats_for(points, trackid)
+            if not stats:
+                continue
+            if min_length and stats['d_total'] < min_length:
                 continue
 
-            stats = stats_for(trackid, track)
-            print(json.dumps(stats, indent=2, default=json_default))
+        print(gpxfile)
+        import code
+        code.interact(local=locals())
 
 
 if __name__ == '__main__':
