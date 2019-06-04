@@ -1,4 +1,4 @@
-# pylint: disable=missing-docstring,invalid-name
+# pylint: disable=missing-docstring,invalid-name,undefined-loop-variable
 
 import datetime
 import io
@@ -19,7 +19,7 @@ def to_miles(m):
 def json_default(v):
     if isinstance(v, numpy.int64):
         return int(v)
-    elif isinstance(v, pd.Timestamp):
+    if isinstance(v, pd.Timestamp):
         return '{}'.format(v)
 
     return json.JSONEncoder().default(v)
@@ -99,11 +99,12 @@ def stats_for(trackid, track):
 
     return stats
 
+
 @click.command()
 @click.argument('gpxfiles', nargs=-1)
-def main(gpxfiles):
+def main(gpxfiles=None):
     for gpxfile in gpxfiles:
-        tracklines, points = read_file(gpxfile)
+        points = read_file(gpxfile)[1]
 
         trackpoints = {}
         for trackid in points.track_fid.unique():
@@ -116,6 +117,7 @@ def main(gpxfiles):
 
             stats = stats_for(trackid, track)
             print(json.dumps(stats, indent=2, default=json_default))
+
 
 if __name__ == '__main__':
     main()
