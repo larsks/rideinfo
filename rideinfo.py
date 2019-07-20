@@ -1,5 +1,3 @@
-# pylint: disable=missing-docstring,invalid-name,undefined-loop-variable
-
 import datetime
 import io
 import json
@@ -9,13 +7,17 @@ import click
 import fiona
 import geopandas as gpd
 import matplotlib.pyplot as plt  # NOQA
-import numpy
+import numpy as np
 import pandas as pd
 import shapely
 
 
 def to_miles(m):
     return m * 0.000621371
+
+
+def to_mph(m):
+    return m * 2.237
 
 
 def json_default(v):
@@ -49,6 +51,24 @@ def read_file(path):
     return tracks, points
 
 
+def haversine_np(lon1, lat1, lon2, lat2):
+    """
+    Calculate the great circle distance between two points
+    on the earth (specified in decimal degrees)
+    """
+    # convert decimal degrees to radians
+    lon1, lat1, lon2, lat2 = map(np.radians,
+                                 [lon1, lat1, lon2, lat2])
+
+    # haversine formula
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    r = 6371000  # Radius of earth in m.
+    return c * r
+
+
 def haversine(lon1, lat1, lon2, lat2):
     """
     Calculate the great circle distance between two points
@@ -67,64 +87,71 @@ def haversine(lon1, lat1, lon2, lat2):
 
 
 def stats_for(points, trackid):
-    track = points[points.track_fid == trackid]
+    track = points.track_fid == trackid
 
-    i1 = track.itertuples(index=True)
-    i2 = track.itertuples(index=True)
-    next(i2)
+    t1 = points.loc[track, :].shift().iloc[1:]
+    t2 = points.loc[track, :].iloc[1:]
+    res = haversine_np(t1.geometry.x, t1.geometry.y,
+                       t2.geometry.x, t2.geometry.y)
 
-    d_total = 0
-    t_total = datetime.timedelta()
-    t_moving = datetime.timedelta()
+    points.loc[track, 'delta_d'] = res
+    points.loc[track, 'delta_t'] = t2.time - t1.time
+    points.loc[track, 'delta_e'] = t2.ele - t1.ele
 
-    for point in zip(i1, i2):
-        delta_d = haversine(point[0].geometry.y, point[0].geometry.x,
-                            point[1].geometry.y, point[1].geometry.x)
-        delta_t = point[1].time - point[0].time
-        delta_e = point[1].ele - point[0].ele
-        speed = delta_d/delta_t.total_seconds()
-
-        points.loc[point[1].Index, 'delta_t'] = delta_t
-        points.loc[point[1].Index, 'delta_d'] = delta_d
-        points.loc[point[1].Index, 'delta_e'] = delta_e
-        points.loc[point[1].Index, 'speed'] = speed
-        points.loc[point[1].Index, 'segment'] = (
-            shapely.geometry.LineString((
-                (point[0].geometry.x, point[0].geometry.y),
-                (point[1].geometry.x, point[1].geometry.y)
-            ))
-        )
-
-        if speed >= 1:
-            t_moving += delta_t
-        t_total += delta_t
-        d_total += delta_d
+    points.loc[track, 'speed'] = (
+        points.loc[track, 'delta_d'] /
+        points.loc[track, 'delta_t'].dt.total_seconds()
+    )
+#        points.loc[point[1].Index, 'segment'] = (
+#            shapely.geometry.LineString((
+#                (point[0].geometry.x, point[0].geometry.y),
+#                (point[1].geometry.x, point[1].geometry.y)
+#            ))
+#        )
 
 
 @click.command()
-@click.option('-m', '--min-length', type=float)
+@click.option('-l', '--min-length', type=float, default=0)
+@click.option('-m', '--moving-speed', type=float, default=0)
 @click.argument('gpxfiles', nargs=-1)
-def main(min_length=None, gpxfiles=None):
+def main(min_length, moving_speed, gpxfiles):
+    agg_tracks = []
     for gpxfile in gpxfiles:
         tracklines, points = read_file(gpxfile)
 
-        points['segment'] = shapely.geometry.LineString()
-        points['speed'] = 0
-        points['delta_d'] = 0
-        points['delta_t'] = 0
-        points['delta_e'] = 0
+        tracks = points.groupby(['track_fid'])
+        for track_fid in tracks.groups.keys():
+            stats_for(points, track_fid)
 
-        for trackid in points.track_fid.unique():
-            stats = stats_for(points, trackid)
-            if not stats:
-                continue
-            if min_length and stats['d_total'] < min_length:
+        for track_fid in tracks.groups.keys():
+            if tracks.sum()['delta_d'][track_fid] < min_length:
                 continue
 
-        print(gpxfile)
-        import code
-        code.interact(local=locals())
+            agg_tracks.append((
+                track_fid,
+                tracks.first().time[track_fid],
+                tracks.sum()['delta_d'][track_fid],
+                tracks.mean()['speed'][track_fid],
+                tracks.get_group(track_fid)[
+                    tracks.get_group(track_fid).speed > moving_speed
+                ].mean()['speed'],
+            ))
 
+    agg_tracks_df = pd.DataFrame(
+        agg_tracks,
+        columns=['track', 'time', 'distance', 'speed', 'moving_speed'])
+
+    breakpoint()
+
+    agg_tracks_df.to_csv('stats.csv')
+    
+    weeks = agg_tracks_df.groupby(pd.Grouper(key='time', freq='W-Sun'))
+    for week in weeks.groups.keys():
+        print(week.strftime('%Y-%m-%d'),
+              to_miles(weeks.sum()['distance'][week]),
+              to_mph(weeks.mean()['speed'][week]),
+              to_mph(weeks.mean()['moving_speed'][week]),
+              )
 
 if __name__ == '__main__':
     main()
